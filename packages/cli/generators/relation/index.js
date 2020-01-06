@@ -23,6 +23,7 @@ const ERROR_SOURCE_MODEL_PRIMARY_KEY_DOES_NOT_EXIST =
   'Source model primary key does not exist.';
 const ERROR_DESTINATION_MODEL_PRIMARY_KEY_DOES_NOT_EXIST =
   'Target model primary key does not exist.';
+const ERROR_REPOSITORY_DOES_NOT_EXIST = 'class does not exist. Please create repositories first with "lb4 repository" command.';
 
 const PROMPT_BASE_RELATION_CLASS = 'Please select the relation type';
 const PROMPT_MESSAGE_SOURCE_MODEL = 'Please select source model';
@@ -85,10 +86,15 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       rootDir: utils.sourceRootDir,
       outDir: utils.sourceRootDir,
     };
+    // to check if model and repo exist
     this.artifactInfo.modelDir = path.resolve(
       this.artifactInfo.rootDir,
       utils.modelsDir,
-    );
+    )
+    this.artifactInfo.repoDir = path.resolve(
+      this.artifactInfo.rootDir,
+      utils.repositoriesDir,
+    )
 
     super._setupGenerator();
     this._arguments = [];
@@ -130,6 +136,16 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       modelList = await utils.getArtifactList(
         this.artifactInfo.modelDir,
         'model',
+      );
+    } catch (err) {
+      return this.exit(err);
+    }
+    let repoList;
+    try {
+      debug(`repository list dir ${this.artifactInfo.repoDir}`);
+      repoList = await utils.getArtifactList(
+        this.artifactInfo.repoDir,
+        'repository',
       );
     } catch (err) {
       return this.exit(err);
@@ -177,6 +193,12 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       if (!modelList.includes(props[parameter])) {
         this.exit(
           new Error(`"${props[parameter]}" ${ERROR_MODEL_DOES_NOT_EXIST}`),
+        );
+      }
+      // checks if the corresponding repository exists
+      if (!repoList.includes(props[parameter])) {
+        this.exit(
+          new Error(`${chalk.yellow(props[parameter])}${chalk.yellow('Repository')} ${ERROR_REPOSITORY_DOES_NOT_EXIST}`),
         );
       }
 
@@ -267,17 +289,33 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       );
     }
 
-    if (
-      this.artifactInfo.relationType === relationUtils.relationType.belongsTo
-    ) {
-      return;
-    }
-
-    this.artifactInfo.targetModelPrimaryKey = await relationUtils.getModelPrimaryKeyProperty(
+    this.artifactInfo.destinationModelPrimaryKey = await relationUtils.getModelPrimaryKeyProperty(
       this.fs,
       this.artifactInfo.modelDir,
       this.artifactInfo.destinationModel,
     );
+
+    if (
+      // for belongsTo the fk is the id property of source model by default
+      // should check the existance of fk here.
+      // FIXME: should prompt to ask the source key name of belongsTo here
+      // instead of put it to the relationName prompt
+      this.artifactInfo.relationType === relationUtils.relationType.belongsTo
+    ) {
+
+      if (this.artifactInfo.destinationModelPrimaryKey == null) {
+        return this.exit(
+          new Error(ERROR_DESTINATION_MODEL_PRIMARY_KEY_DOES_NOT_EXIST),
+        );
+      }
+
+      this.artifactInfo.destinationModelPrimaryKeyType = relationUtils.getModelPropertyType(
+        this.artifactInfo.modelDir,
+        this.artifactInfo.destinationModel,
+        this.artifactInfo.destinationModelPrimaryKey,
+      );
+      return;
+    }
 
     if (this.artifactInfo.sourceModelPrimaryKey == null) {
       return this.exit(
@@ -285,6 +323,7 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       );
     }
 
+    // FIXME: problematic, how we define the default name conflict with belongsTo factory
     this.artifactInfo.defaultForeignKeyName =
       utils.camelCase(this.artifactInfo.sourceModel) +
       utils.toClassName(this.artifactInfo.sourceModelPrimaryKey);
@@ -338,27 +377,6 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
 
   async promptRelationName() {
     if (this.shouldExit()) return false;
-    if (
-      this.artifactInfo.relationType === relationUtils.relationType.belongsTo
-    ) {
-      this.artifactInfo.destinationModelPrimaryKey = await relationUtils.getModelPrimaryKeyProperty(
-        this.fs,
-        this.artifactInfo.modelDir,
-        this.artifactInfo.destinationModel,
-      );
-      if (this.artifactInfo.destinationModelPrimaryKey == null) {
-        return this.exit(
-          new Error(ERROR_DESTINATION_MODEL_PRIMARY_KEY_DOES_NOT_EXIST),
-        );
-      }
-
-      this.artifactInfo.destinationModelPrimaryKeyType = relationUtils.getModelPropertyType(
-        this.artifactInfo.modelDir,
-        this.artifactInfo.destinationModel,
-        this.artifactInfo.destinationModelPrimaryKey,
-      );
-    }
-
     if (this.options.relationName) {
       debug(
         `Relation name received from command line: ${this.options.relationName}`,
@@ -376,12 +394,33 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       },
     ]).then(props => {
       debug(`props after relation name prompt: ${inspect(props)}`);
+      // checks if the relation name already exist
+      this.artifactInfo.srcRepositoryFile = path.resolve(
+        this.artifactInfo.repoDir,
+        utils.getRepositoryFileName(this.artifactInfo.sourceModel),
+      );
+      this.artifactInfo.srcRepositoryClassName =
+        utils.toClassName(this.artifactInfo.sourceModel) + 'Repository';
+      this.artifactInfo.srcRepositoryFileObj = new relationUtils.AstLoopBackProject().addExistingSourceFile(
+        this.artifactInfo.srcRepositoryFile,
+      );
+
+      const classDeclaration = this.artifactInfo.srcRepositoryFileObj.getClassOrThrow(
+        this.artifactInfo.srcRepositoryClassName,
+      );
+      if (relationUtils.doesPropertyExist(classDeclaration, props)) {
+        return this.exit(new Error(
+          `relation ${chalk.yellow(props)} already exist in the repository ${chalk.yellow(this.artifactInfo.srcRepositoryClassName)}.`,
+        ));
+      }
+
       Object.assign(this.artifactInfo, props);
       return props;
     });
   }
 
   async promptRegisterInclusionResolver() {
+    if (this.shouldExit()) return false;
     const props = await this.prompt([
       {
         type: 'confirm',

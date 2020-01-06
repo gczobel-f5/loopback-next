@@ -38,13 +38,17 @@ module.exports = class BaseRelationGenerator extends ArtifactGenerator {
     super._setupGenerator();
   }
 
+  // needs to check:
+  // 1. both repo exist? (source and dest)
+  // 2. property already exist? (the fk, both
+  // 3. relation name already exists? ( only hasMany prompt. But need to check both
   async generateAll(options) {
-    this._setupGenerator();
-    await this.generateControllers(options);
     this._setupGenerator();
     await this.generateModels(options);
     this._setupGenerator();
     await this.generateRepositories(options);
+    this._setupGenerator();
+    await this.generateControllers(options);
   }
 
   async generateControllers(options) {
