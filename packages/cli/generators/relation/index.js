@@ -23,15 +23,19 @@ const ERROR_SOURCE_MODEL_PRIMARY_KEY_DOES_NOT_EXIST =
   'Source model primary key does not exist.';
 const ERROR_DESTINATION_MODEL_PRIMARY_KEY_DOES_NOT_EXIST =
   'Target model primary key does not exist.';
-const ERROR_REPOSITORY_DOES_NOT_EXIST = 'class does not exist. Please create repositories first with "lb4 repository" command.';
+const ERROR_REPOSITORY_DOES_NOT_EXIST =
+  'class does not exist. Please create repositories first with "lb4 repository" command.';
 
 const PROMPT_BASE_RELATION_CLASS = 'Please select the relation type';
 const PROMPT_MESSAGE_SOURCE_MODEL = 'Please select source model';
 const PROMPT_MESSAGE_TARGET_MODEL = 'Please select target model';
 const PROMPT_MESSAGE_PROPERTY_NAME =
-  'Source property name for the relation getter';
+  'Source property name for the relation getter (will be the relation name)';
+const PROMPT_MESSAGE_RELATION_NAME = 'Relation name';
 const PROMPT_MESSAGE_FOREIGN_KEY_NAME =
   'Foreign key name to define on the target model';
+const PROMPT_MESSAGE_SOURCE_KEY_NAME =
+  'Source key name to define on the source model';
 
 module.exports = class RelationGenerator extends ArtifactGenerator {
   constructor(args, opts) {
@@ -63,6 +67,12 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       description: 'Destination model',
     });
 
+    this.option('sourceKeyName', {
+      type: String,
+      required: false,
+      description: 'Source model source key name',
+    });
+
     this.option('foreignKeyName', {
       type: String,
       required: false,
@@ -73,6 +83,11 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       type: String,
       required: false,
       description: 'Relation name',
+    });
+    this.option('defaultRelationName', {
+      type: String,
+      required: false,
+      description: 'Default relation name',
     });
 
     this.option('registerInclusionResolver', {
@@ -90,11 +105,11 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
     this.artifactInfo.modelDir = path.resolve(
       this.artifactInfo.rootDir,
       utils.modelsDir,
-    )
+    );
     this.artifactInfo.repoDir = path.resolve(
       this.artifactInfo.rootDir,
       utils.repositoriesDir,
-    )
+    );
 
     super._setupGenerator();
     this._arguments = [];
@@ -115,9 +130,10 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
     let defaultRelationName;
     switch (this.artifactInfo.relationType) {
       case relationUtils.relationType.belongsTo:
-        defaultRelationName =
-          utils.camelCase(this.artifactInfo.destinationModel) +
-          utils.toClassName(this.artifactInfo.destinationModelPrimaryKey);
+        // this is how the belongsToAccessor generates the default relation name
+        defaultRelationName = utils.camelCase(
+          this.artifactInfo.sourceKeyName.replace(/Id$/, ''),
+        );
         break;
       case relationUtils.relationType.hasMany:
         defaultRelationName = utils.pluralize(
@@ -198,7 +214,11 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       // checks if the corresponding repository exists
       if (!repoList.includes(props[parameter])) {
         this.exit(
-          new Error(`${chalk.yellow(props[parameter])}${chalk.yellow('Repository')} ${ERROR_REPOSITORY_DOES_NOT_EXIST}`),
+          new Error(
+            `${chalk.yellow(props[parameter])}${chalk.yellow(
+              'Repository',
+            )} ${ERROR_REPOSITORY_DOES_NOT_EXIST}`,
+          ),
         );
       }
 
@@ -271,6 +291,8 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
    *  3. Generate foreign key (camelCase source class Name + primary key name).
    *  4. Check is foreign key exist in destination model. If not - prompt.
    *  Error - if type is not the same.
+   *
+   * For belongsTo this is getting source key not fk.
    */
   async promptForeignKey() {
     if (this.shouldExit()) return false;
@@ -294,27 +316,46 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       this.artifactInfo.modelDir,
       this.artifactInfo.destinationModel,
     );
+    this.artifactInfo.destinationModelPrimaryKeyType = relationUtils.getModelPropertyType(
+      this.artifactInfo.modelDir,
+      this.artifactInfo.destinationModel,
+      this.artifactInfo.destinationModelPrimaryKey,
+    );
+
+    if (this.artifactInfo.destinationModelPrimaryKey == null) {
+      return this.exit(
+        new Error(ERROR_DESTINATION_MODEL_PRIMARY_KEY_DOES_NOT_EXIST),
+      );
+    }
+    // for controller usage;
+    this.artifactInfo.targetModelPrimaryKey = await relationUtils.getModelPrimaryKeyProperty(
+      this.fs,
+      this.artifactInfo.modelDir,
+      this.artifactInfo.destinationModel,
+    );
 
     if (
-      // for belongsTo the fk is the id property of source model by default
-      // should check the existance of fk here.
-      // FIXME: should prompt to ask the source key name of belongsTo here
-      // instead of put it to the relationName prompt
       this.artifactInfo.relationType === relationUtils.relationType.belongsTo
     ) {
+      // for belongsTo the fk is the id property of source model by default
+      // should check the existance of fk here.
+      // default source key for belongsTo
+      this.artifactInfo.defaultSourceKeyName =
+        utils.camelCase(this.artifactInfo.destinationModel) +
+        utils.toClassName(this.artifactInfo.destinationModelPrimaryKey);
 
-      if (this.artifactInfo.destinationModelPrimaryKey == null) {
-        return this.exit(
-          new Error(ERROR_DESTINATION_MODEL_PRIMARY_KEY_DOES_NOT_EXIST),
-        );
-      }
-
-      this.artifactInfo.destinationModelPrimaryKeyType = relationUtils.getModelPropertyType(
-        this.artifactInfo.modelDir,
-        this.artifactInfo.destinationModel,
-        this.artifactInfo.destinationModelPrimaryKey,
-      );
-      return;
+      return this.prompt([
+        {
+          type: 'string',
+          name: 'sourceKeyName',
+          message: PROMPT_MESSAGE_SOURCE_KEY_NAME,
+          when: this.artifactInfo.relationName === undefined,
+          default: this.artifactInfo.defaultSourceKeyName,
+        },
+      ]).then(props => {
+        debug(`props after relation name prompt: ${inspect(props)}`);
+        Object.assign(this.artifactInfo, props);
+      });
     }
 
     if (this.artifactInfo.sourceModelPrimaryKey == null) {
@@ -323,7 +364,7 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       );
     }
 
-    // FIXME: problematic, how we define the default name conflict with belongsTo factory
+    // For hasMany (and hasOne)
     this.artifactInfo.defaultForeignKeyName =
       utils.camelCase(this.artifactInfo.sourceModel) +
       utils.toClassName(this.artifactInfo.sourceModelPrimaryKey);
@@ -383,14 +424,20 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
       );
       this.artifactInfo.relationName = this.options.relationName;
     }
+    this.artifactInfo.defaultRelationName = this._getDefaultRelationName();
+    // for hasMany && hasOne, the source key is the same as the relation name
+    const msg =
+      this.artifactInfo.relationType === 'belongsTo'
+        ? PROMPT_MESSAGE_RELATION_NAME
+        : PROMPT_MESSAGE_PROPERTY_NAME;
 
     return this.prompt([
       {
         type: 'string',
         name: 'relationName',
-        message: PROMPT_MESSAGE_PROPERTY_NAME,
+        message: msg,
         when: this.artifactInfo.relationName === undefined,
-        default: this._getDefaultRelationName(),
+        default: this.artifactInfo.defaultRelationName,
       },
     ]).then(props => {
       debug(`props after relation name prompt: ${inspect(props)}`);
@@ -405,13 +452,25 @@ module.exports = class RelationGenerator extends ArtifactGenerator {
         this.artifactInfo.srcRepositoryFile,
       );
 
-      const classDeclaration = this.artifactInfo.srcRepositoryFileObj.getClassOrThrow(
+      const repoClassDeclaration = this.artifactInfo.srcRepositoryFileObj.getClassOrThrow(
         this.artifactInfo.srcRepositoryClassName,
       );
-      if (relationUtils.doesPropertyExist(classDeclaration, props)) {
-        return this.exit(new Error(
-          `relation ${chalk.yellow(props)} already exist in the repository ${chalk.yellow(this.artifactInfo.srcRepositoryClassName)}.`,
-        ));
+      // checks if the relation name already exists in repo
+      if (
+        relationUtils.doesPropertyExist(
+          repoClassDeclaration,
+          props.relationName,
+        )
+      ) {
+        return this.exit(
+          new Error(
+            `relation ${chalk.yellow(
+              props.relationName,
+            )} already exist in the repository ${chalk.yellow(
+              this.artifactInfo.srcRepositoryClassName,
+            )}.`,
+          ),
+        );
       }
 
       Object.assign(this.artifactInfo, props);
